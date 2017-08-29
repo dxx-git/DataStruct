@@ -1,0 +1,147 @@
+#pragma once
+
+//设计简易内存池，即固定大小的内存池，也称作对象池
+template <class T>
+class ObjectPool
+{
+    //定义一个内部类，用来保存每个大块内存的节点
+    struct Node
+    {
+        Node* _memory;    //指向大块内存的指针
+        size_t _n;       //当前节点里面的对象个数
+        Node* _next;     //指向下一个大块内存节点
+
+        Node(size_t nobjs)   //构造函数
+        {
+            _n = nobjs;
+            _memory = (Node*)::operator new(_n * GetObjSize());//调用operator new失败后直接抛异常,不会调构造函数
+            _next = NULL;
+        }
+        ~Node()            //析构函数
+        {
+            ::operator delete(_memory);//operator delete直接析构对象，不会调析构函数
+            _memory = NULL;
+            _next = NULL;
+            _n = 0;
+        }
+    };
+
+public:
+    ObjectPool(size_t initNobjs = 16,size_t maxNobjs = 1024)//构造函数
+        :_initNobjs(initNobjs)
+        ,_maxNobjs(maxNobjs)
+    {
+        _head = _tail = new Node(initNobjs);     //默认初始大块内存节点创建16个对象
+        _useInCount = 0;                        //刚开始还没有使用对象
+        _lastDelete = NULL;                     //也没有释放回来的节点
+    } 
+    ~ObjectPool()    //析构函数
+    {
+        Node* cur = _head;
+        while (cur)
+        {
+            Node* next = cur->_next;   //保存下一个大块内存节点
+            delete cur;               //释放当前节点
+            cur = next;               //更新当前节点
+        }
+        _head = _tail = NULL;
+    }
+    inline static size_t GetObjSize()    /*获取每个对象的大小，\
+                                         \设置静态成员函数，保证在类中的可见性\
+                                       \设置内联函数，提高运行速率*/
+    {
+        return sizeof(T)>sizeof(T*) ? sizeof(T):sizeof(T*);
+    }
+
+    //O(1)
+    void* Allocate()    //申请空间
+    {
+        //优先申请释放回来的对象
+        if (_lastDelete)//如果_lastDelete不为空，说明有释放回来的对象，应重复利用
+        {
+            void* obj = _lastDelete;        //用obj保存最近一次释放的对象
+            _lastDelete = *(T**)_lastDelete;/*隐式链表：将_lastDelete强转为T**,然后\
+                                            \解引用取到前sizeof(T*)个字节，即第二个\
+                                            \最近释放的对象,然后将其赋值给_lastDelete*/
+            return obj;                   //返回obj
+        }
+
+        //到Node里面获取对象,如果没有内存可使用，就分配更大块的内存
+        if (_useInCount >= _tail->_n)
+        {
+            AllocateNewNode();//分配更大块的内存，有消耗
+        }
+
+        //内存池中还有已经分配好但未使用的内存
+        void* obj = (char*)_tail->_memory + _useInCount*GetObjSize();//将指针偏移到未使用的对象处
+        _useInCount++;                //已经使用的对象个数++
+        return obj;
+    }
+    void Deallocate(void* ptr)      //释放内存
+    {
+        if (ptr)
+        {
+            //相当于头插
+            *(T**)ptr = _lastDelete;//将最近释放对象的隐式链表的地址赋给当前要释放对象的前(T*)个字节
+            _lastDelete = (T*)ptr;//将当前要释放的对象的地址赋值给_lastDelete
+        }
+    }
+
+    //模板函数
+    template <class Val>
+    T* New(const Val& val)//申请对象并且初始化
+    {
+        void* obj = Allocate();
+        return new(obj)T(val);//调用new定位表达式对新节点进行初始化
+    }
+    void Delete(T* ptr)//释放内存并清理对象
+    {
+        if (ptr)
+        {
+            ptr->~T();   //显示调用析构函数来清理对象
+            Deallocate(ptr);
+        }
+    }
+protected:
+
+    void AllocateNewNode()       //申请大块内存节点
+    {
+        size_t n = _tail->_n * 2;//每次申请对象个数为上个节点的2倍
+        if (n > _maxNobjs)      //最大节点的上限为_maxNobjs个对象
+            n = _maxNobjs;
+
+        Node* node = new Node(n);
+        _tail->_next = node;    //将申请的新结点链到链表末端
+        _tail = node;          //更新尾节点
+        _useInCount = 0;       //将新结点的已使用的对象更新为0
+    }
+
+protected:
+    size_t _initNobjs;     //想要申请的大块内存的对象个数（默认值为16）
+    size_t _maxNobjs;     //大块内存节点最多可分配的对象个数（默认最大为1024）
+    Node* _head;          //指向大块内存链表的头
+    Node* _tail;          //指向大块内存链表的尾
+    size_t _useInCount;   //当前节点已经用了多少个对象
+    T* _lastDelete;       //指向最新释放的对象空间
+};
+
+void TestObjectPool()
+{
+    ObjectPool<string> pool;             //定义一个内存池对象
+    string* p1 = (string*)pool.Allocate();//使用其中的一个对象
+    string* p2 = (string*)pool.Allocate();//再使用其中的一个对象
+    pool.Deallocate(p1);                 //释放对象
+    pool.Deallocate(p2);                 //释放对象
+    string* p3 = (string*)pool.Allocate();//理应重复使用释放的对象
+    string* p4 = (string*)pool.Allocate();//理应重复使用释放的对象
+
+    ObjectPool<string> pool1;
+    string* p5 = pool1.New("测试");
+    pool.Delete(p5);
+    string* p6 = (string*)pool1.Allocate();
+    pool1.Deallocate(p6);
+
+
+    pool.Deallocate(p3);
+    pool.Deallocate(p4);
+}
